@@ -1,0 +1,20 @@
+# Normalise every text file to LF in the repository and in the working tree.
+* text=auto eol=lf
+
+# Windows entry points must keep CRLF line endings to run from cmd.exe.
+*.cmd text eol=crlf
+
+# POSIX entry point must keep LF so the shebang works.
+bin/dbcli text eol=lf
+
+# Binary assets: never convert, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.avif binary
+
+# SVG is text; keep it normalised to LF.
+*.svg text eol=lf

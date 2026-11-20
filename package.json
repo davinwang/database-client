@@ -1,0 +1,49 @@
+{
+  "name": "database-client",
+  "version": "0.2.3",
+  "description": "Zero-credential, read-only-by-default database & middleware CLI for coding agents: discovers per-project env vars, inspects schema, runs queries, diagnoses locks/slow SQL, follows Redis Cluster redirects, and inspects Kafka topics/lag/messages across MySQL, PostgreSQL, Oracle, SQL Server, SQLite, MongoDB, Redis, Kafka, ClickHouse and Elasticsearch.",
+  "license": "GPL-3.0-or-later",
+  "author": "Wang Dong <wangdong4@gtht.com>",
+  "homepage": "https://github.com/davinwang/database-client#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davinwang/database-client.git"
+  },
+  "bugs": {
+    "url": "https://github.com/davinwang/database-client/issues"
+  },
+  "keywords": [
+    "database",
+    "cli",
+    "mysql",
+    "postgresql",
+    "oracle",
+    "sqlserver",
+    "sqlite",
+    "mongodb",
+    "redis",
+    "kafka",
+    "clickhouse",
+    "elasticsearch",
+    "agent",
+    "skill"
+  ],
+  "type": "module",
+  "bin": {
+    "dbcli": "bin/dbcli.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "SKILL.md",
+    "README.md",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --test tests/",
+    "test:sandbox": "node --test --test-isolation=none \"tests/**/*.test.mjs\""
+  }
+}

@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-24
+
+### Added
+
+- **Write approval (confirmation dialog).** `--allow-write` alone now executes nothing: it prints a
+  confirmation card, a request ID and a one-time code, then exits 7. The agent shows the card through the host
+  confirmation tool (`ask_user_question` on DSH, `AskUserQuestion` on Claude Code/WorkBuddy, text fallback
+  elsewhere), runs `dbcli approve --id <requestId> --answer "同意执行"`, and reruns the same command with
+  `--approve <code> --agent`. Approvals are fingerprint-bound (verb + mode + engine + connection + masked
+  target + the exact statement), single-use, session-bound, and expire (5 min for the request, 10 min for the
+  signed grant).
+- A signed write approval also covers the matching `--dry-run` and is not spent by it, so "verify the blast
+  radius, then commit" costs one dialog.
+- The card states the action, location, impact and statement, including blast-radius hints (no `WHERE`,
+  `WHERE 1=1`, `INSERT ... SELECT`, auto-committing DDL in a dry run).
+- `doctor` reports the detected approval host, confirmation tool, session marker and hand-off file.
+- New modules `lib/approval.mjs`, `lib/hosts.mjs`, `lib/authorize.mjs`; tests `tests/approval.test.mjs`
+  (fingerprints, one-time codes, TTL, session binding, dry-run interaction) and `tests/approve-cli.test.mjs`
+  (8 end-to-end cases over SQLite).
+
+### Changed
+
+- **Breaking:** `--allow-write` no longer executes a write by itself; automation must go through `approve` and
+  `--approve <code> --agent`. A human at a terminal gets the same card plus a `y/N` prompt instead of a
+  second command.
+- `--dry-run` requires approval too: on MySQL/Oracle-style engines DDL commits implicitly, so a trial run can
+  really change the schema.
+- Write JSON output gained `authorizedBy`; new exit code `7` = write approval required / not granted (nothing
+  executed).
+- The driver registry now records which modes each engine can execute, so an engine that cannot write fails with
+  its own explanation instead of prompting for an approval it could not use. The capability matrix reflects
+  that ClickHouse writes are unsupported (the driver always rejected them).
+- The approval hand-off record lives in `<temp>/dbcli-approvals/approvals.json` (`DBCLI_STATE_DIR` overrides
+  it); it holds no credentials and no result rows, and the CLI fails closed when it cannot be written.
+
 ## [0.2.3] - 2026-11-20
 
 ### Fixed

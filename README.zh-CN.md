@@ -136,6 +136,7 @@ host=pg port=5432 user=app dbname=erp         # libpq DSN
 | `drivers` | 驱动状态；`drivers install <名字>\|all`；`drivers clean` |
 | `ping` | 版本、库、用户、延迟、只读会话状态 |
 | `query` | 执行 SQL（Redis 命令 / Mongo JSON / ES REST 也走这里） |
+| `approve` | 用户确认后签发写操作授权（`approve --id <请求号> --answer "同意执行"`） |
 | `tables` | 表/视图；`--pattern` 过滤；Mongo 集合、ES 索引同理 |
 | `desc` | 列名/类型/可空/默认值/主键/注释 |
 | `ddl` | 建表语句（MySQL 用 `SHOW CREATE TABLE`，其余按数据字典重建） |
@@ -155,8 +156,10 @@ host=pg port=5432 user=app dbname=erp         # libpq DSN
 --timeout <ms>      连接/查询超时，默认 15000
 --env-file <path>   额外 .env（可重复）
 --insecure-tls      跳过证书校验
---allow-write       允许写（先向用户确认）
---dry-run           写操作试跑后回滚（必须配合 --allow-write）
+--allow-write       申请写操作（仍需确认框授权）
+--dry-run           写操作试跑后回滚（必须配合 --allow-write，且同样需要授权）
+--approve <码>      带一次性授权码执行写操作
+--agent             标记授权来自宿主确认框（与 --approve 一起用）
 ```
 
 ### 查询示例
@@ -202,8 +205,8 @@ Kafka 没有 SQL，`query` 接一个只读操作（JSON 或裸操作名）：
 | 模式 | 命令 | 行为 |
 | --- | --- | --- |
 | 只读（默认） | `dbcli query "..."` | 语句白名单 + 会话级只读（MySQL/PG/Oracle/SQLite/ClickHouse）+ 自动限行 |
-| 写入 | `dbcli query "update ..." --allow-write` | 单条语句，执行后报告影响行数 |
-| 试跑 | `dbcli query "update ..." --allow-write --dry-run` | 事务内执行后 `ROLLBACK`，只报告影响行数 |
+| 写入 | `dbcli query "update ..." --allow-write` + 授权 | 单条语句，执行后报告影响行数 |
+| 试跑 | `dbcli query "update ..." --allow-write --dry-run` + 授权 | 事务内执行后 `ROLLBACK`，只报告影响行数 |
 
 - 只读拦截：`insert/update/delete/merge/truncate/drop/alter/create/grant/revoke/call`、
   `select ... into outfile`、`for update`、`nextval()/setval()`、`pragma 赋值`、多语句、
@@ -215,6 +218,40 @@ Kafka 没有 SQL，`query` 接一个只读操作（JSON 或裸操作名）：
 - `--dry-run` 单独使用会报错（试跑也会真实加锁、触发触发器，不允许偷偷执行）。
 - 支持 dry-run：MySQL/OceanBase/PostgreSQL/Oracle/达梦/SQL Server/SQLite；
   不支持：ClickHouse（无事务）、Redis/Mongo/ES（会明确说明原因）。
+
+## 写操作授权（确认框）
+
+**光有 `--allow-write` 什么都不会改**：它只打印确认卡片 + 请求号 + 一次性授权码，然后以退出码 **7** 结束。
+在用户回答确认框之前，命令不会碰数据库。
+
+```bash
+# 1) 发起写请求（不执行；--json 直接返回可用的弹框参数）
+dbcli query "update orders set status='X' where id=42" --allow-write --json
+# {"status":"approval_required","channel":"agent","host":"dsh","requestId":"c969…","approvalCode":"VP54ST",
+#  "plan":{…},"card":{…},"next":{"tool":"ask_user_question","params":{…},"onApprove":"…","thenRun":"…"}}
+
+# 2) Agent 把 card.question 原样弹给用户（DSH 用 ask_user_question）
+
+# 3) 用户选「同意执行」→ 签发授权
+dbcli approve --id c969938a796806a1 --answer "同意执行"
+
+# 4) 带码执行
+dbcli query "update orders set status='X' where id=42" --allow-write --approve VP54ST --agent
+```
+
+- 卡片是中文的（`数据库写操作授权` … `[同意执行] [取消]`），因为读它的是人；选项文案必须原样传给 `--answer`。
+- 授权指纹 = 动作 + 模式 + 引擎 + 连接名 + 脱敏目标 + 完整语句，改任何一项（包括换个 `--db`）旧码立刻失效；
+  授权码一次性、5 分钟过期（签发后的凭据 10 分钟），并且绑定发起请求的宿主会话。
+- 已签发的 **write** 授权同时覆盖同一语句的 `--dry-run`，且试跑不消耗它：授权一次 → 预演看影响行数 → 真正提交。
+  反过来不成立，`dry-run` 的授权不能用来真写。
+- 宿主映射：DSH `ask_user_question`、Claude Code `AskUserQuestion`、WorkBuddy `AskUserQuestion`、
+  Codex（无提问工具：展示卡片，明确同意后再 `approve`）、其余走文本确认。`dbcli doctor` 会打印识别到的宿主。
+- 交接记录位置：`<临时目录>/dbcli-approvals/approvals.json`（`DBCLI_STATE_DIR` 可改）。里面只有指纹、脱敏目标、
+  截断的语句预览和时间戳——没有密码、没有查询结果，用掉即删；目录不可写时命令直接失败（fail closed）。
+- 人在终端里直接跑时看到同一张卡片 + `y/N` 提示；没有任何环境变量或配置项能替代授权。
+
+诚实边界：Agent 与 CLI 同处一个 shell，恶意 Agent 理论上能读到交接记录并重放；这里保证的是
+「默认不静默执行 + 每次都能追到请求号、宿主与通道」。
 
 ## 引擎支持矩阵
 
@@ -265,39 +302,48 @@ dbcli drivers clean                       # 清掉 node_modules 与 npm 缓存
 
 - `--format auto`：TTY 出表格，管道/捕获出 JSON。
 - JSON：`{columns, rowCount, truncated, durationMs, rows}`；文档结果是 `documents`；
-  写/试跑是 `{mode, statement, affectedRows, rolledBack}`。
+  写/试跑是 `{mode, statement, affectedRows, rolledBack, authorizedBy}`。
+- 待授权的写操作返回 `{status:"approval_required", requestId, approvalCode, plan, card,
+  next:{tool, params, onApprove, thenRun, thenRunArgs}}`，退出码 7；`next.params` 可直接喂给宿主确认工具，
+  `next.thenRunArgs` 是带码重跑用的精确参数表。
 - 行数被截断时 `truncated: true`；单元格按 `--max-cell` 截断；二进制显示 `<binary N B>`；
   bigint 转字符串避免精度丢失。
 - 密码永不出现：列表只显示 `passwordSet` 与长度；错误信息里的连接串会打码。
 
-退出码：`0` 成功 · `1` 其他 · `2` 用法 · `3` 连接选择 · `4` 只读拦截 · `5` 缺驱动 · `6` 连接失败。
+退出码：`0` 成功 · `1` 其他 · `2` 用法 · `3` 连接选择 · `4` 只读拦截 · `5` 缺驱动 · `6` 连接失败 ·
+`7` 写操作待授权/未获授权（什么都没执行）。
 
 ## 架构
 
 ```text
 bin/dbcli.mjs            入口（薄）
 lib/cli.mjs              参数解析、分发、帮助、退出码
-lib/commands.mjs         命令实现（薄：只做连接 + 调用驱动 + 渲染）
+lib/commands.mjs         命令实现（薄：连接 + 授权关卡 + 调用驱动 + 渲染）
 lib/connections.mjs      环境变量 → 连接模型（URL/JDBC/DSN 解析、去重、脱敏）
 lib/discover.mjs         项目发现（.env 层级、docker-compose、Spring）
 lib/env.mjs              .env 解析（引号/转义/展开/行号）
 lib/yaml.mjs             极简 YAML / properties（只服务 compose 与 Spring）
-lib/guard.mjs            只读护栏、语句切分、限行注入、Redis/Mongo/ES 白名单
+lib/guard.mjs            只读护栏、语句切分、限行注入、Redis/Mongo/ES 白名单、影响面提示
+lib/approval.mjs         写操作授权仓库：指纹、一次性码、有效期、会话绑定
+lib/hosts.mjs            宿主识别（DSH/Claude/Codex/WorkBuddy）+ 确认卡片
+lib/authorize.mjs        授权关卡：计划 → 卡片 → approve → 校验 --approve
 lib/errors.mjs           错误 → 排查建议（各引擎几十种码）
 lib/output.mjs           表格/JSON/CSV/Markdown、脱敏、截断
 lib/drivers/*.mjs        每个引擎一个驱动：ping/query/tables/describe/ddl/indexes/locks/slow
 ```
 
 新增一个引擎：在 `lib/drivers/` 加一个 `create(conn, options)` 模块（实现上述方法中能实现的，
-不支持的抛 `UnsupportedError` 并给替代查法），在 `lib/drivers/index.mjs` 的 `DRIVERS` 注册类型与依赖，
-在 `lib/connections.mjs` 的 `TYPE_ALIASES`/`TYPE_META` 加别名与默认端口。
+不支持的抛 `UnsupportedError` 并给替代查法），在 `lib/drivers/index.mjs` 的 `DRIVERS` 注册类型、
+依赖与 `modes`（read/write/dry-run），在 `lib/connections.mjs` 的 `TYPE_ALIASES`/`TYPE_META` 加别名与默认端口。
 
 ## 安全模型
 
-- **不落盘**：不写 `.env`、不建缓存、不存历史；每次调用重新读取。
+- **不落盘**：不写 `.env`、不建连接缓存、不存历史；每次调用重新读取。唯一会写的文件是短期授权交接记录
+  （指纹、脱敏目标、时间戳）。
 - **最小权限**：默认只读连接；生产库建议使用只读账号。
 - **可审计**：所有输出带目标（`mysql://user@host:port/db`）与凭据来源（文件:行号）。
-- **防误删**：写操作必须显式 `--allow-write`；建议先 `--dry-run` 看影响行数。
+- **防误删**：写操作必须 `--allow-write` + 逐条弹框授权 + `dbcli approve` 签发；`--dry-run`（同样需授权）
+  先看影响行数。
 - **防泄漏**：密码不打印；错误信息中的连接串自动打码。
 
 ## 测试
@@ -308,6 +354,7 @@ node --test tests/                                          # 常规环境
 ```
 
 覆盖：`.env` 与变量展开、compose/Spring 发现、连接串（JDBC/Go DSN/libpq）、只读护栏与限行注入、
+写操作授权（指纹、一次性码、过期与会话绑定、`approve` 端到端、影响面提示）、
 输出格式与脱敏、SQLite 真库端到端、Redis（RESP mock）、ClickHouse/Elasticsearch（HTTP mock）、驱动注册表。
 
 ## 已知限制

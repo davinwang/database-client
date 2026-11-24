@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseJson, runCli } from './helpers/util.mjs';
+import { approvalEnv, approveWrite, parseJson, runCli } from './helpers/util.mjs';
 import { startRedisMock } from './helpers/mocks.mjs';
 import { keySlot } from '../lib/drivers/redis.mjs';
 
@@ -44,9 +44,15 @@ test('Redis: ping / query / slowlog / read-only guard / allow-write', async () =
     assert.equal(blocked.code, 4);
     assert.match(blocked.stderr, /Refusing Redis SET in read-only mode/);
 
-    const written = await runCli(['query', 'SET k v', '--allow-write'], { env });
-    assert.equal(written.code, 0, written.stderr);
-    assert.equal(parseJson(written.stdout).mode, 'write');
+    // A write needs the confirmation hand-off: --allow-write alone only prints the card
+    const writeEnv = { ...env, ...approvalEnv() };
+    const requested = await runCli(['query', 'SET k v', '--allow-write'], { env: writeEnv });
+    assert.equal(requested.code, 7);
+    assert.match(requested.stdout, /approval_required/);
+
+    const write = await approveWrite(['query', 'SET k v', '--allow-write'], { env: writeEnv });
+    assert.equal(write.executed.code, 0, write.executed.stderr);
+    assert.equal(parseJson(write.executed.stdout).mode, 'write');
 
     const locks = await runCli(['locks'], { env });
     assert.notEqual(locks.code, 0);

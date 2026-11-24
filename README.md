@@ -143,6 +143,7 @@ host=pg port=5432 user=app dbname=erp         # libpq DSN
 | `drivers` | Driver status; `drivers install <name>\|all`; `drivers clean` |
 | `ping` | Version, database, user, latency, read-only session state |
 | `query` | Execute SQL (Redis commands / Mongo JSON / ES REST also go through here) |
+| `approve` | Sign a write approval after the user confirms in the host dialog (`approve --id <requestId> --answer "同意执行"`) |
 | `tables` | Tables and views; `--pattern` filters; Mongo collections and ES indexes work the same way |
 | `desc` | Column name/type/nullability/default/primary key/comment |
 | `ddl` | `CREATE TABLE` statement (MySQL uses `SHOW CREATE TABLE`; other engines rebuild it from the data dictionary) |
@@ -164,8 +165,10 @@ Common options:
 --pattern <glob>    Table/index name filter (supports % or * wildcards)
 --no-auto           Skip automatic discovery of .env / compose / application.yml
 --insecure-tls      Skip certificate verification
---allow-write       Permit writes (confirm with the user first)
---dry-run           Run a write and roll it back (requires --allow-write)
+--allow-write       Ask for a write (still needs the confirmation dialog)
+--dry-run           Execute a write then roll back (needs --allow-write and its own approval)
+--approve <code>    Run the write with the one-time approval code
+--agent             Mark the approval as signed by the host dialog (with --approve)
 ```
 
 ### Query examples
@@ -212,8 +215,8 @@ Notes:
 | Mode | Command | Behaviour |
 | --- | --- | --- |
 | Read (default) | `dbcli query "..."` | Statement allowlist + session-level read-only (MySQL/PG/Oracle/SQLite/ClickHouse) + automatic row cap |
-| Write | `dbcli query "update ..." --allow-write` | A single statement; reports affected rows afterwards |
-| Dry run | `dbcli query "update ..." --allow-write --dry-run` | Executes inside a transaction, then `ROLLBACK`; reports affected rows only |
+| Write | `dbcli query "update ..." --allow-write` + approval | A single statement; reports affected rows afterwards |
+| Dry run | `dbcli query "update ..." --allow-write --dry-run` + approval | Executes inside a transaction, then `ROLLBACK`; reports affected rows only |
 
 - Read-only interception: `insert/update/delete/merge/truncate/drop/alter/create/grant/revoke/call`,
   `select ... into outfile`, `for update`, `nextval()/setval()`, `pragma` assignments, multiple statements,
@@ -226,6 +229,44 @@ Notes:
 - `--dry-run` on its own is an error (a trial run still takes real locks and fires triggers, so it may not be used silently).
 - Dry run is supported for MySQL/OceanBase/PostgreSQL/Oracle/DM8/SQL Server/SQLite;
   not for ClickHouse (no transactions) or Redis/Mongo/ES (the CLI explains why).
+
+## Write approval (confirmation dialog)
+
+**`--allow-write` alone never changes anything.** It prints a confirmation card, a request ID and a one-time
+code, then exits **7**. Nothing reaches the database until the user answers a dialog the agent must show.
+
+```bash
+# 1) Request the write (--json returns the ready-to-use dialog arguments; nothing is executed)
+dbcli query "update orders set status='X' where id=42" --allow-write --json
+# {"status":"approval_required","channel":"agent","host":"dsh","requestId":"c969…","approvalCode":"VP54ST",
+#  "plan":{…},"card":{…},"next":{"tool":"ask_user_question","params":{…},"onApprove":"…","thenRun":"…"}}
+
+# 2) The agent shows card.question to the user with the host confirmation tool (DSH: ask_user_question)
+
+# 3) The user picked 「同意执行」 → sign the approval
+dbcli approve --id c969938a796806a1 --answer "同意执行"
+
+# 4) Run the write
+dbcli query "update orders set status='X' where id=42" --allow-write --approve VP54ST --agent
+```
+
+- The card is Chinese (`数据库写操作授权` … `[同意执行] [取消]`) because a human reads it; its labels must be
+  passed to `--answer` verbatim.
+- The approval fingerprint covers verb + mode + engine + connection + masked target + the exact statement, so
+  any change (including a different `--db`) invalidates the code. Codes are single-use, expire after 5 minutes
+  (10 for the signed grant), and are bound to the host session that asked.
+- A signed **write** approval also covers the matching `--dry-run`, and the trial run does not spend it:
+  approve once, dry-run to see the affected rows, then commit. A dry-run approval never covers a write.
+- Host mapping: DSH `ask_user_question`, Claude Code `AskUserQuestion`, WorkBuddy `AskUserQuestion`,
+  Codex (no question tool: show the card, run `approve` after an explicit yes), anything else text confirmation.
+  `dbcli doctor` prints the detected host, tool and session.
+- Hand-off record: `<temp>/dbcli-approvals/approvals.json` (`DBCLI_STATE_DIR` overrides). It stores fingerprints,
+  the masked target, a truncated statement preview and timestamps — no passwords, no result rows — and entries
+  are deleted on use. If it cannot be written, the command fails instead of executing (fail closed).
+- A human at a terminal gets the same card plus a `y/N` prompt; no env var or config key approves anything.
+
+Honest boundary: the agent and the CLI share one shell, so a hostile agent could replay the record. The
+guarantee is "nothing silent by default, and every write is traceable to a request ID, host and channel".
 
 ## Engine support matrix
 
@@ -277,26 +318,32 @@ dbcli drivers clean                       # remove node_modules and the npm cach
 
 - `--format auto`: a table on a TTY, JSON when piped or captured.
 - JSON: `{columns, rowCount, truncated, durationMs, rows}`; document results use `documents`;
-  writes and dry runs return `{mode, statement, affectedRows, rolledBack}`.
+  writes and dry runs return `{mode, statement, affectedRows, rolledBack, authorizedBy}`.
+- A write awaiting approval returns `{status:"approval_required", requestId, approvalCode, plan, card,
+  next:{tool, params, onApprove, thenRun, thenRunArgs}}` and exits 7; `next.params` feeds the host
+  confirmation tool directly, and `next.thenRunArgs` is the exact argument list for the approved rerun.
 - A capped result sets `truncated: true`; cells are truncated according to `--max-cell`; binary values render as `<binary N B>`;
   bigint values become strings so no precision is lost.
 - Passwords never appear: listings show only `passwordSet` and a length; connection strings inside error messages are masked.
 
 Exit codes: `0` success, `1` other error, `2` usage error, `3` connection selection, `4` read-only guard,
-`5` missing driver, `6` connection failure.
+`5` missing driver, `6` connection failure, `7` write approval required / not granted (nothing executed).
 
 ## Architecture
 
 ```text
 bin/dbcli.mjs            entry point (thin)
 lib/cli.mjs              argument parsing, dispatch, help, exit codes
-lib/commands.mjs         command implementations (thin: connect, call driver, render)
+lib/commands.mjs         command implementations (thin: connect, gate, call driver, render)
 lib/connections.mjs      env vars -> connection model (URL/JDBC/DSN parsing, dedupe, masking)
 lib/discover.mjs         project discovery (.env layering, docker-compose, Spring)
 lib/configfiles.mjs      language-agnostic config adapters (.NET appsettings, Rails, Node, INI/JSON URLs)
 lib/env.mjs              .env parsing (quotes/escapes/expansion/line numbers)
 lib/yaml.mjs             minimal YAML / properties (only for compose and Spring)
-lib/guard.mjs            read-only guard, statement splitting, LIMIT injection, Redis/Mongo/ES allowlists
+lib/guard.mjs            read-only guard, statement splitting, LIMIT injection, Redis/Mongo/ES allowlists, blast-radius hints
+lib/approval.mjs         write approval store: fingerprints, one-time codes, TTLs, session binding
+lib/hosts.mjs            host detection (DSH/Claude/Codex/WorkBuddy) + the confirmation card
+lib/authorize.mjs        the write gate: plan -> card -> approve -> `--approve` verification
 lib/errors.mjs           error -> troubleshooting hints (dozens of engine codes)
 lib/output.mjs           table/JSON/CSV/Markdown, masking, truncation
 lib/drivers/*.mjs        one driver per engine: ping/query/tables/describe/ddl/indexes/locks/slow
@@ -309,10 +356,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist.
 
 ## Security model
 
-- **Nothing persisted**: no `.env` writes, no caches, no history; every invocation re-reads the project.
+- **Nothing persisted**: no `.env` writes, no connection caches, no history; every invocation re-reads the project.
+  The only file written is the short-lived approval hand-off record (fingerprints, masked target, timestamps).
 - **Least privilege**: read-only connections by default; use a read-only account against production.
 - **Auditable**: every output carries the target (`mysql://user@host:port/db`) and where the credentials came from (file:line).
-- **Accident prevention**: writes require an explicit `--allow-write`; use `--dry-run` first to see the affected row count.
+- **Accident prevention**: a write needs `--allow-write`, a per-statement confirmation dialog, and
+  `dbcli approve` signed by the user's answer; `--dry-run` (also approved) shows the affected row count first.
 - **Leak prevention**: passwords are never printed, and connection strings in error messages are masked.
 
 ## Testing
@@ -323,7 +372,8 @@ npm run test:sandbox                                        # no child processes
 ```
 
 Coverage: `.env` parsing and variable expansion, compose/Spring discovery, connection strings (JDBC/Go DSN/libpq),
-the read-only guard and LIMIT injection, output formats and masking, end-to-end SQLite against a real database,
+the read-only guard and LIMIT injection, write approval (fingerprints, one-time codes, expiry/session binding,
+`approve` end-to-end, blast-radius hints), output formats and masking, end-to-end SQLite against a real database,
 Redis (RESP mock), ClickHouse/Elasticsearch (HTTP mock), and the driver registry.
 
 ## Known limitations

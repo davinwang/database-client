@@ -1,7 +1,7 @@
 ---
 name: database-client
-version: 0.2.3
-description: "数据库/中间件排查客户端（dbcli）：连接信息全部来自项目环境变量/.env，skill 自身不保存任何地址与密码；默认只读，能执行 SQL、看表结构/索引/DDL、锁等待与慢 SQL TOP N，也能查 Kafka 的 topic/分区/消息采样/消费积压。支持 MySQL/MariaDB/TiDB/TDSQL/PolarDB/GoldenDB、OceanBase（MySQL/Oracle 模式）、PostgreSQL/Kingbase/Vastbase/GaussDB/openGauss、Oracle、达梦 DM8、SQL Server、SQLite、MongoDB、Redis、Kafka/Redpanda、ClickHouse、Elasticsearch。当用户提到连数据库看数据、查表结构、跑条 SQL、慢查询、锁等待/死锁、连接不上库、Access denied、ORA-、OceanBase/达梦/信创数据库、explain、核对线上数据、Kafka topic 没消息/消费积压/分区不均衡、Redis 慢命令、ES 索引查询时使用。不负责生成或优化业务 SQL，也不负责改数据/发消息（写操作必须逐次向用户确认）。"
+version: 0.3.0
+description: "数据库/中间件排查客户端（dbcli）：连接信息全部来自项目环境变量/.env，skill 自身不保存任何地址与密码；默认只读，能执行 SQL、看表结构/索引/DDL、锁等待与慢 SQL TOP N，也能查 Kafka 的 topic/分区/消息采样/消费积压。支持 MySQL/MariaDB/TiDB/TDSQL/PolarDB/GoldenDB、OceanBase（MySQL/Oracle 模式）、PostgreSQL/Kingbase/Vastbase/GaussDB/openGauss、Oracle、达梦 DM8、SQL Server、SQLite、MongoDB、Redis、Kafka/Redpanda、ClickHouse、Elasticsearch。当用户提到连数据库看数据、查表结构、跑条 SQL、慢查询、锁等待/死锁、连接不上库、Access denied、ORA-、OceanBase/达梦/信创数据库、explain、核对线上数据、Kafka topic 没消息/消费积压/分区不均衡、Redis 慢命令、ES 索引查询时使用。不负责生成或优化业务 SQL，也不负责改数据/发消息（每条写操作都必须先弹确认框、由用户逐次授权后才执行）。"
 metadata:
   requires:
     bins: ["node"]
@@ -16,10 +16,11 @@ metadata:
 
 三条硬约束：
 
-1. **不存凭据**：没有配置文件、没有缓存、没有历史记录。每次调用重新读当前项目的环境变量 / `.env`，
-   密码只在内存里活一次。`list`、`env`、错误信息、JSON 输出都不含明文密码。
+1. **不存凭据**：没有配置文件、没有连接缓存、没有历史记录。每次调用重新读当前项目的环境变量 / `.env`，
+   密码只在内存里活一次。`list`、`env`、错误信息、JSON 输出都不含明文密码。（唯一会落盘的是
+   短期「授权交接记录」——只有指纹和时间戳，不含任何凭据，见「写操作授权」。）
 2. **默认只读**：写语句在解析阶段就被拦下（退出码 4），会话层再做只读事务/只读打开。
-   要写必须 `--allow-write`，并且**先向用户说清楚改什么、影响几行**。
+   要写必须 `--allow-write` **并且**过一道用户确认框（每条语句单独授权，未授权时退出码 7），确认前什么都不执行。
 3. **不做 SQL 生成器**：没有 `sample`/`count`/`explain` 这类包装命令——那些就是 `query` 加一句 SQL。
 
 支持：MySQL/MariaDB/TiDB/TDSQL/PolarDB/GoldenDB、OceanBase（两种模式）、
@@ -156,21 +157,92 @@ dbcli env --all         # 连被覆盖的变量一起看（排查「为什么连
 | 模式 | 触发 | 行为 |
 | --- | --- | --- |
 | `read`（默认） | 什么都不加 | 语句白名单 + 会话级只读（MySQL/PG/Oracle/SQLite/ClickHouse）+ 自动行数上限 |
-| `write` | `--allow-write` | 单条写语句，执行后报告影响行数 |
-| `dry-run` | `--allow-write --dry-run` | 在事务里真跑一遍再 `ROLLBACK`，只报告影响行数（不改变数据） |
+| `write` | `--allow-write` + 授权 | 单条写语句，执行后报告影响行数 |
+| `dry-run` | `--allow-write --dry-run` + 授权 | 在事务里真跑一遍再 `ROLLBACK`，只报告影响行数（不改变数据） |
 
-**写之前必须问用户**（这是硬要求，不是建议）：
-
-> 「要执行 `UPDATE orders SET status='X' WHERE ...`，预计影响 N 行（先 `--dry-run` 验证过），
-> 目标库 `erp`（mysql://…@10.0.0.5:3306/erp）。确认执行吗？」
-
-拿到明确同意才加 `--allow-write`。`--dry-run` 单独使用会直接报错——**试跑也会真实加锁、触发触发器**，
-不允许拿来「悄悄试一下」。
+`--dry-run` 单独使用会直接报错——**试跑也会真实执行**（加锁、触发触发器），而 MySQL/Oracle 系引擎的 DDL
+会自动提交、ROLLBACK 挡不住，所以「试跑」也可能真的改了结构。这就是 `--dry-run` 也必须单独授权、
+不能拿来「悄悄试一下」的原因。
 
 只读拦截覆盖：`insert/update/delete/merge/truncate/drop/alter/create/grant/revoke/call`、
 `select ... into outfile`、`for update`、`nextval()/setval()`、读服务器文件、
 `pragma 赋值`、多语句、`explain` 非只读语句。Redis 走命令白名单，Mongo 拦 `$out/$merge`，
 ES 只放行 GET/HEAD 与 `_search/_count/_msearch` 类 POST。
+
+## 写操作授权（确认框）
+
+写命令**不带 `--approve` 时不会改动任何东西**：它只打印确认卡片 + 请求号 + 一次性授权码，退出码 **7**。
+授权只认「用户在交互弹框里选了同意」，四步，没有旁路：
+
+```bash
+# 1) Agent 发起写请求（不执行；--json 直接给出可用的弹框参数）
+dbcli query "update orders set status='X' where id=42" --allow-write --json
+# → {"status":"approval_required","channel":"agent","host":"dsh","requestId":"c969938a796806a1",
+#    "approvalCode":"VP54ST","plan":{...},"card":{...},
+#    "next":{"tool":"ask_user_question","params":{...},"onApprove":"...","thenRun":"..."}}
+
+# 2) Agent 用本宿主的确认工具把 card 原样弹给用户（DSH 是 ask_user_question，见下表）
+
+# 3) 用户选「同意执行」→ 签发一次性凭据
+dbcli approve --id c969938a796806a1 --answer "同意执行"
+
+# 4) 带码执行
+dbcli query "update orders set status='X' where id=42" --allow-write --approve VP54ST --agent
+```
+
+卡片长这样（用户读的就是这段，措辞与选项不要改写）：
+
+```
+数据库写操作授权
+Agent 要执行一条会修改数据库的语句，请确认：
+动作：UPDATE（write 真实提交）
+位置：erp（mysql）· mysql://app@10.0.0.5:3306/erp
+影响：没有 WHERE 条件，可能影响整表所有行
+语句：update orders set status='X'
+是否允许执行？            [同意执行] [取消]
+```
+
+授权指纹包含：动作 + 模式 + 引擎 + 连接名 + 脱敏目标 + **完整语句文本**。任一项变化，旧码立即失效。
+授权码一次性使用，请求 5 分钟内有效（凭据 10 分钟），并且绑定在发起请求的宿主会话上。
+
+**「先预演再执行」不用弹第二次框**：已签发的 `write` 授权同时覆盖同一语句的 `--dry-run`，且试跑不消耗它：
+
+```bash
+dbcli query "update orders set status='X' where id=42" --allow-write --dry-run --approve VP54ST --agent   # affectedRows: 1
+dbcli query "update orders set status='X' where id=42" --allow-write --approve VP54ST --agent             # 真正提交
+```
+
+反过来不成立：`dry-run` 的授权不能用来执行真实写入。
+
+### 各 Agent 的确认工具
+
+先跑 `dbcli doctor`，它会打印识别到的宿主、确认工具、会话标识和交接记录位置。
+
+| 宿主 | 确认工具 | 关键差异 |
+| --- | --- | --- |
+| **DSH** | `ask_user_question` | 原生支持：`next.params` 可直接传入（`questions[{id,header,question,options,multi_select}]`） |
+| **Claude Code** | `AskUserQuestion` | 工具名 PascalCase；参数同构但 `multiSelect` 是驼峰；无会话变量，会话退化为 `user@host` |
+| **Codex CLI** | 无独立提问工具 | 把卡片原样展示，用户明确同意后再跑 `dbcli approve` |
+| **WorkBuddy** | `AskUserQuestion` | 选项式提问，每题最多 4 项 |
+| 其它/未知 | 文本确认 | 把卡片原样转述，等用户明确回复 |
+
+Agent 必须遵守：
+
+1. **必须弹框**（或宿主等价机制），不能只在文字里问一句就执行。
+2. 卡片里的「动作/位置/影响/语句」要与 CLI 输出**完全一致**，不要美化、不要省略影响、不要丢掉语句。
+3. 选项文案保持 `同意执行` / `取消`；`--answer` 必须与用户的选择逐字一致，否则签不出来。
+4. 用户选「取消」→ 停止。不要重试、不要换个参数再来、不要在同一个回复里再问一次。
+5. 不许代替用户执行 `dbcli approve`，也不许凭记忆/猜测填 `--approve`。
+6. 人在终端里直接跑时，看到的是同一张卡片 + `y/N` 提示；不存在任何环境变量或配置项能替代授权。
+
+### 授权状态存在哪
+
+`<系统临时目录>/dbcli-approvals/approvals.json`（可用 `DBCLI_STATE_DIR` 改）。里面只有计划指纹、
+脱敏目标、截断后的语句预览、宿主会话标记和时间戳——**没有密码、没有查询结果**；用掉即删，过期即清。
+该目录不可写时命令直接失败（fail closed），不会退化成「无授权也执行」。
+
+诚实边界：Agent 与 CLI 同处一个 shell，恶意 Agent 理论上能读到交接记录并重放。这里保证的是
+「默认不静默执行 + 每次都能追到请求号、宿主与通道」；要密码学级隔离需要带外审批（如 IM 审批卡片）。
 
 ## 命令速查
 
@@ -182,6 +254,7 @@ ES 只放行 GET/HEAD 与 `_search/_count/_msearch` 类 POST。
 | `drivers` | 驱动状态/安装/清理 | `dbcli drivers install mysql postgres` |
 | `ping` | 版本、库、延迟 | `dbcli ping --db erp` |
 | `query` | 执行 SQL（Redis 命令 / Mongo JSON / ES REST 也走这里） | `dbcli query "select * from orders where id=1"` |
+| `approve` | 用户确认后签发写操作授权 | `dbcli approve --id <请求号> --answer "同意执行"` |
 | `tables` | 表/视图（Mongo 集合、ES 索引、Kafka topic） | `dbcli tables --db erp --pattern 'order%'` |
 | `desc` | 列/类型/可空/默认值/主键（Kafka：分区/ISR/位点） | `dbcli desc orders --db erp` |
 | `ddl` | 建表语句/字段映射 | `dbcli ddl orders` |
@@ -190,7 +263,8 @@ ES 只放行 GET/HEAD 与 `_search/_count/_msearch` 类 POST。
 | `slow` | 慢 SQL / 慢命令 TOP N | `dbcli slow -n 10` |
 
 通用参数：`--db <名字>`、`--schema <schema>`、`--limit <N>`（query 默认 200，slow 默认 20）、
-`--no-limit`、`--format table|json|csv|md`、`--timeout <ms>`、`--env-file`、`--insecure-tls`。
+`--no-limit`、`--format table|json|csv|md`、`--timeout <ms>`、`--env-file`、`--insecure-tls`；
+写操作另加 `--allow-write`、`--dry-run`、`--approve <授权码>`、`--agent`。
 
 `--pattern`：SQL 引擎接受 `*` 或 `%` 通配符（不带通配符时按子串匹配）；Elasticsearch 用索引 glob
 （`logs-*`）；MongoDB 按子串匹配。
@@ -284,13 +358,17 @@ dbcli query "EXPLAIN <原 SQL>"   # 看执行计划（PG/Oracle/SQLite 用 EXPLA
 
 - 默认 `--format auto`：**终端里出表格，被管道/Agent 捕获时出 JSON**（`--format` 可覆盖）。
 - JSON 结构固定：`{columns, rowCount, truncated, durationMs, rows:[{...}]}`；
-  文档型结果（Mongo/ES）是 `{rowCount, documents:[...]}`；写/试跑是 `{mode, statement, affectedRows, rolledBack}`。
+  文档型结果（Mongo/ES）是 `{rowCount, documents:[...]}`；写/试跑是
+  `{mode, statement, affectedRows, rolledBack, authorizedBy}`。
+- 还需要授权的写操作输出 `{status:"approval_required", requestId, approvalCode, plan, card,
+  next:{tool, params, onApprove, thenRun, thenRunArgs}}`，退出码 7。`next.thenRunArgs` 是重跑用的精确参数表，
+  `next.params` 可直接喂给宿主确认工具。
 - **`truncated: true` 表示结果被行数上限截断**，不是「就这么多」；要全量用 `--no-limit`（慎用）或加 `WHERE`。
 - 单元格默认截断：表格 80 字符、JSON 4096 字符（`--max-cell` 调整）；二进制显示为 `<binary N B>`。
 - 大整数（`bigint`）输出为字符串，避免 JS 精度丢失；`NULL` 在表格里是 `NULL`、JSON 里是 `null`。
 
 退出码：`0` 成功 · `1` 其他错误 · `2` 用法错误 · `3` 连接选择/参数问题 · `4` 只读护栏拦截 ·
-`5` 驱动未安装 · `6` 连接失败。
+`5` 驱动未安装 · `6` 连接失败 · `7` 写操作待授权/未获授权（什么都没执行）。
 
 ## 常见错误 → 下一步
 
@@ -310,7 +388,9 @@ dbcli query "EXPLAIN <原 SQL>"   # 看执行计划（PG/Oracle/SQLite 用 EXPLA
 | Kafka `SASL` / `Authentication failed` | 用户名/密码/机制不匹配 | `KAFKA_SASL_MECHANISM` 选 plain/scram-sha-256/scram-sha-512，配 SSL |
 | Kafka `COORDINATOR_NOT_AVAILABLE` | 消费组协调器在迁移 | 等几秒重试；持续出现说明 broker 抖动 |
 | Kafka `UNKNOWN_TOPIC_OR_PARTITION` | topic 名错 / ACL 隐藏 | `dbcli tables` 确认名字 |
-| 只读拒绝（退出码 4） | 语句是写操作 | 确认要改再 `--allow-write`；先 `--dry-run` 看影响行数 |
+| 只读拒绝（退出码 4） | 语句是写操作 | 加 `--allow-write` 只会打印确认卡片，然后弹框、`approve`、带 `--approve <码> --agent` 重跑 |
+| 写操作待授权（退出码 7） | 没带 `--approve`，或码错/过期/已用过，或语句/连接变了 | 去掉 `--approve` 重跑同一命令拿新卡片；不要去猜码 |
+| 授权状态写不进去 | 状态目录不可写 | 放开该目录写权限，或用 `DBCLI_STATE_DIR` 指到可写目录 |
 | 缺少驱动（退出码 5） | 该类库还没装驱动 | `dbcli drivers install <名字>`（见下节） |
 | 证书/`self-signed certificate` | 内网自签 TLS | 信任网络时加 `--insecure-tls` |
 
@@ -320,8 +400,9 @@ dbcli query "EXPLAIN <原 SQL>"   # 看执行计划（PG/Oracle/SQLite 用 EXPLA
 
 1. **不打印密码**：`list`/`env`/错误/JSON 一律只给 `passwordSet` 与来源行号。
 2. **不写配置文件**：不生成 `.env`、不落盘 token、不做连接缓存。
-3. **不绕过只读**：不要用 `--allow-write` 之外的任何方式（如自己写 mysql 脚本）绕过护栏。
-4. **生产库优先只读账号**；没有只读账号时也**先只读查询**，写操作逐次确认。
+3. **不绕过只读**：不要用自己写 mysql/redis 脚本的方式绕过护栏，也不要绕过授权关卡
+   （不许代替用户 `approve`、不许手改状态文件）。
+4. **生产库优先只读账号**；没有只读账号时也**先只读查询**，写操作每条都要拿到弹框授权。
 5. 大表查询一律带 `WHERE`/`LIMIT`；`--no-limit` 只用于确认过规模的场景。
 6. 采样/输出里出现身份证、手机号、密码哈希等敏感列时，不要整表 dump 到对话里。
 
@@ -371,8 +452,9 @@ node bin/dbcli.mjs driver...                                # 手测
 ```
 
 测试覆盖：环境变量/`.env` 解析、compose/Spring 发现、连接串（含 JDBC/Go DSN/libpq）、
-只读护栏与限行注入、输出格式、SQLite 真库端到端、Redis mock（RESP）、ClickHouse/ES mock（HTTP）。
+只读护栏与限行注入、写操作授权（指纹、一次性码、过期与会话绑定、`approve` 端到端、影响面提示）、
+输出格式、SQLite 真库端到端、Redis mock（RESP）、ClickHouse/ES mock（HTTP）。
 
 ## 版本
 
-`0.2.3` —— 与 `package.json` 保持一致；能力变化请同时更新本文件与 README。
+`0.3.0` —— 与 `package.json` 保持一致；能力变化请同时更新本文件与 README。

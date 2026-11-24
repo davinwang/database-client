@@ -1,7 +1,7 @@
 ---
 name: database-client
-version: 0.2.3
-description: "Database and middleware troubleshooting client (dbcli) for coding agents. Connections come exclusively from the project's environment variables and .env files; the skill stores no URLs or credentials. Read-only by default. Runs SQL, inspects schema/indexes/DDL, finds lock waits and slow queries, and inspects Kafka topics/partitions/messages/consumer lag. Supports MySQL/MariaDB/TiDB/TDSQL/PolarDB/GoldenDB, OceanBase (MySQL and Oracle modes), PostgreSQL/Kingbase/Vastbase/GaussDB/openGauss, Oracle, DM8, SQL Server, SQLite, MongoDB, Redis, Kafka/Redpanda, ClickHouse and Elasticsearch. Use when the user asks to query a database, inspect a table or its indexes, run a SQL statement, investigate slow queries, lock waits or deadlocks, fix connection or authentication failures (Access denied, ORA-*, ECONNREFUSED), check OceanBase/DM8/Kingbase or other domestic databases, read EXPLAIN plans, verify production data, investigate Kafka topics with missing messages or consumer lag, Redis slow commands, or Elasticsearch indices. Not a SQL generator and not a data-modification tool: writes require explicit per-command user approval."
+version: 0.3.0
+description: "Database and middleware troubleshooting client (dbcli) for coding agents. Connections come exclusively from the project's environment variables and .env files; the skill stores no URLs or credentials. Read-only by default. Runs SQL, inspects schema/indexes/DDL, finds lock waits and slow queries, and inspects Kafka topics/partitions/messages/consumer lag. Supports MySQL/MariaDB/TiDB/TDSQL/PolarDB/GoldenDB, OceanBase (MySQL and Oracle modes), PostgreSQL/Kingbase/Vastbase/GaussDB/openGauss, Oracle, DM8, SQL Server, SQLite, MongoDB, Redis, Kafka/Redpanda, ClickHouse and Elasticsearch. Use when the user asks to query a database, inspect a table or its indexes, run a SQL statement, investigate slow queries, lock waits or deadlocks, fix connection or authentication failures (Access denied, ORA-*, ECONNREFUSED), check OceanBase/DM8/Kingbase or other domestic databases, read EXPLAIN plans, verify production data, investigate Kafka topics with missing messages or consumer lag, Redis slow commands, or Elasticsearch indices. Not a SQL generator and not a data-modification tool: every write needs a per-command confirmation dialog (the user approves once per statement) before anything runs."
 metadata:
   requires:
     bins: ["node"]
@@ -17,12 +17,15 @@ results and errors clearly.
 
 Three hard rules:
 
-1. **No stored credentials.** No config file, no cache, no history. Every invocation re-reads the current
-   project's environment variables and `.env` files; passwords live only in memory. `list`, `env`, error
-   output and JSON output never contain a plaintext password.
+1. **No stored credentials.** No config file, no connection cache, no history. Every invocation re-reads the
+   current project's environment variables and `.env` files; passwords live only in memory. `list`, `env`, error
+   output and JSON output never contain a plaintext password. (The only file this tool ever writes is the
+   short-lived approval hand-off record — fingerprints and timestamps, never credentials; see
+   [Write approval](#write-approval).)
 2. **Read-only by default.** Write statements are rejected during parsing (exit code 4) and a second,
-   session-level read-only transaction is applied where the engine supports it. Writing requires
-   `--allow-write`, and the affected rows must be explained to the user first.
+   session-level read-only transaction is applied where the engine supports it. A write needs `--allow-write`
+   **and** a confirmation dialog the user answers, per statement (exit code 7 until then); nothing is executed
+   before that.
 3. **Not a SQL generator.** There are no `sample`/`count`/`explain` wrapper commands — those are just
    `query` plus a statement.
 
@@ -55,7 +58,8 @@ tells you which file and line a value came from — check that line first.
 **Do not use it for:**
 
 - Writing application SQL for you (the agent writes it; the CLI only executes).
-- Changing data or schema (read-only by default; writes need per-command approval and one statement at a time).
+- Changing data or schema (read-only by default; each write needs a confirmation dialog and runs one
+  statement at a time — see [Write approval](#write-approval)).
 - Migrations, ETL, or performance-tuning design.
 
 ## Where configuration comes from (no credentials are stored)
@@ -165,21 +169,101 @@ Exactly three modes:
 | Mode | Trigger | Behaviour |
 | --- | --- | --- |
 | `read` (default) | nothing | statement allow-list + session-level read-only + automatic row limit |
-| `write` | `--allow-write` | one write statement, reports affected rows |
-| `dry-run` | `--allow-write --dry-run` | executes inside a transaction, then `ROLLBACK`; reports affected rows |
+| `write` | `--allow-write` + approval | one write statement, reports affected rows |
+| `dry-run` | `--allow-write --dry-run` + approval | executes inside a transaction, then `ROLLBACK`; reports affected rows |
 
-**Ask the user before writing** (hard requirement, not a suggestion):
-
-> "This will run `UPDATE orders SET status='X' WHERE ...`, affecting N rows (verified with `--dry-run`),
-> on `erp` (mysql://…@10.0.0.5:3306/erp). Proceed?"
-
-Only add `--allow-write` after an explicit yes. `--dry-run` alone is rejected — a dry-run still takes
-locks and fires triggers, so it must not be used to "try it quietly".
+`--dry-run` alone is rejected — a trial run still executes (it takes locks and fires triggers), and on
+MySQL/Oracle-style engines DDL commits implicitly, so a "dry run" can change the schema for real. That is
+why `--dry-run` needs its own approval and is not a way to try things quietly.
 
 Blocked in read-only mode: `insert/update/delete/merge/truncate/drop/alter/create/grant/revoke/call`,
 `select ... into outfile`, `for update`, `nextval()/setval()`, server-side file reads, `pragma` assignment,
 multiple statements, and non-read-only `explain`. Redis is command-allow-listed, MongoDB blocks
 `$out/$merge`, Elasticsearch only allows GET/HEAD and query-style POST, and Kafka only allows its read ops.
+
+## Write approval
+
+A write command **without `--approve` never changes anything**: it prints a confirmation card, a request ID
+and a one-time code, and exits **7**. Approval only comes from an interactive dialog the user answers. Four
+steps, no shortcuts:
+
+```bash
+# 1) The agent requests the write. Nothing is executed; --json gives the ready-to-use dialog arguments
+dbcli query "update orders set status='X' where id=42" --allow-write --json
+# → {"status":"approval_required","channel":"agent","host":"dsh","requestId":"c969938a796806a1",
+#    "approvalCode":"VP54ST","plan":{...},"card":{...},
+#    "next":{"tool":"ask_user_question","params":{...},"onApprove":"...","thenRun":"..."}}
+
+# 2) The agent shows `card` to the user with the host confirmation tool
+#    (ask_user_question on DSH; see the mapping table below)
+
+# 3) The user picked 「同意执行」 → sign the approval
+dbcli approve --id c969938a796806a1 --answer "同意执行"
+
+# 4) Run the write with the code
+dbcli query "update orders set status='X' where id=42" --allow-write --approve VP54ST --agent
+```
+
+The card (Chinese on purpose — it is what the user reads, and its labels must stay verbatim):
+
+```
+数据库写操作授权
+Agent 要执行一条会修改数据库的语句，请确认：
+动作：UPDATE（write 真实提交）
+位置：erp（mysql）· mysql://app@10.0.0.5:3306/erp
+影响：没有 WHERE 条件，可能影响整表所有行
+语句：update orders set status='X'
+是否允许执行？            [同意执行] [取消]
+```
+
+What is fingerprinted (any change invalidates the old code): verb + mode + engine + connection name +
+masked target + the **exact statement text**. The code is single-use and expires in 5 minutes (request) /
+10 minutes (grant), and it is bound to the host session that asked.
+
+**Verify the blast radius without a second dialog.** A signed `write` approval also covers the matching
+`--dry-run`, and the trial run does not spend it:
+
+```bash
+dbcli query "update orders set status='X' where id=42" --allow-write --dry-run --approve VP54ST --agent   # affectedRows: 1
+dbcli query "update orders set status='X' where id=42" --allow-write --approve VP54ST --agent             # committed
+```
+
+A `dry-run` approval never covers the real write.
+
+### Host confirmation tools
+
+Run `dbcli doctor` to see the detected host, tool, session, and where the hand-off record lives.
+
+| Host | Confirmation tool | Notes |
+| --- | --- | --- |
+| **DSH** | `ask_user_question` | native: `next.params` passes straight through (`questions[{id,header,question,options,multi_select}]`) |
+| **Claude Code** | `AskUserQuestion` | PascalCase tool name; same shape but `multiSelect` is camelCase; no session variable, session falls back to `user@host` |
+| **Codex CLI** | none (command approval) | show the card verbatim; run `dbcli approve` only after an explicit yes |
+| **WorkBuddy** | `AskUserQuestion` | option-style, at most 4 options per question |
+| **other / unknown** | text confirmation | relay the card verbatim, wait for a clear yes |
+
+Agent rules:
+
+1. **The dialog is mandatory** — do not "ask in passing" in prose and then run the write.
+2. Relay `card.question` **as-is**: action, location, impact and statement exactly as the CLI printed them.
+   Do not soften the impact or drop the statement.
+3. The option labels must stay `同意执行` / `取消`; `--answer` must match the user's choice verbatim,
+   otherwise the signature is refused.
+4. User picked `取消` → stop. Do not retry, do not rephrase the SQL, do not ask again in the same breath.
+5. Never run `dbcli approve` on the user's behalf, and never add `--approve` with a guessed/remembered code.
+6. A human running it in a terminal gets the same card and a `y/N` prompt; there is no env var or config key
+   that approves anything.
+
+### Where the hand-off record lives
+
+`$TMPDIR/dbcli-approvals/approvals.json` (override with `DBCLI_STATE_DIR`). It holds only plan fingerprints,
+the masked target, a truncated statement preview, the session marker and timestamps — **no passwords, no
+result rows**, and entries are deleted when used and pruned when expired. If that directory is not writable
+the command fails instead of executing (fail closed).
+
+Honest boundary: the agent and the CLI share one shell, so a hostile agent could in principle read and replay
+the record. What is guaranteed is "nothing silent by default, and every write is traceable to a request ID, a
+host, and a channel". For cryptographic isolation, use out-of-band approval (e.g. an IM approval card).
 
 ## Commands
 
@@ -191,6 +275,7 @@ multiple statements, and non-read-only `explain`. Redis is command-allow-listed,
 | `drivers` | Driver status / install / clean | `dbcli drivers install mysql postgres` |
 | `ping` | Version, database, user, latency | `dbcli ping --db erp` |
 | `query` | Execute SQL (also Redis commands, Mongo JSON, ES REST, Kafka read ops) | `dbcli query "select * from orders where id=1"` |
+| `approve` | Sign a write approval after the user confirms | `dbcli approve --id <requestId> --answer "同意执行"` |
 | `tables` | Tables/views (Mongo collections, ES indices, Kafka topics) | `dbcli tables --db erp --pattern 'order%'` |
 | `desc` | Columns/types/nullability/defaults/keys (Kafka: partitions/ISR/offsets) | `dbcli desc orders --db erp` |
 | `ddl` | CREATE statement / field mapping | `dbcli ddl orders` |
@@ -199,7 +284,8 @@ multiple statements, and non-read-only `explain`. Redis is command-allow-listed,
 | `slow` | Slow SQL / slow commands, top N | `dbcli slow -n 10` |
 
 Common options: `--db <name>`, `--schema <schema>`, `--limit <N>` (query default 200, slow default 20),
-`--no-limit`, `--format table|json|csv|md`, `--timeout <ms>`, `--env-file`, `--insecure-tls`.
+`--no-limit`, `--format table|json|csv|md`, `--timeout <ms>`, `--env-file`, `--insecure-tls`, and for writes
+`--allow-write`, `--dry-run`, `--approve <code>`, `--agent`.
 
 `--pattern` accepts `*` or `%` as wildcards for SQL engines (a pattern without a wildcard is treated as a
 substring); Elasticsearch uses index globs (`logs-*`) and MongoDB uses a substring match.
@@ -286,7 +372,7 @@ terminal-encoding issue, not a data-encoding issue.
 | MongoDB | ✅ find/aggregate | ✅ sampled fields | ⚠️ no DDL | ✅ | ✅ currentOp | ✅ system.profile | ❌ | ❌ | mongodb |
 | Redis | ✅ commands | ❌ | ❌ | ❌ | ❌ (single-threaded) | ✅ SLOWLOG | ✅ allow-listed | ❌ | built-in RESP |
 | Kafka / Redpanda | ✅ read ops | ✅ topics | ❌ | ❌ | ❌ (check ISR/leader) | ❌ (check lag) | ❌ | ❌ | kafkajs |
-| ClickHouse | ✅ | ✅ | ✅ SHOW CREATE | ✅ primary/sorting key | ❌ (no row locks) | ✅ system.query_log | ✅ | ❌ (no transactions) | HTTP |
+| ClickHouse | ✅ | ✅ | ✅ SHOW CREATE | ✅ primary/sorting key | ❌ (no row locks) | ✅ system.query_log | ❌ (no transactions) | ❌ (no transactions) | HTTP |
 | Elasticsearch | ✅ REST | ✅ indices/mapping | ⚠️ no DDL | ❌ | ❌ | ❌ | ❌ | ❌ | HTTP |
 
 `⚠️` means the result depends on the exact version/privileges; when unsupported, the command says so and
@@ -297,14 +383,17 @@ suggests the equivalent view instead of returning an empty result.
 - Default `--format auto`: a table on a TTY, JSON when piped/captured by an agent (`--format` overrides).
 - JSON shape: `{columns, rowCount, truncated, durationMs, rows:[{...}]}`; document results
   (Mongo/ES/Kafka peek) are `{rowCount, documents:[...]}`; writes/dry-runs are
-  `{mode, statement, affectedRows, rolledBack}`.
+  `{mode, statement, affectedRows, rolledBack, authorizedBy}`.
+- A write that still needs approval is `{status:"approval_required", requestId, approvalCode, plan, card,
+  next:{tool, params, onApprove, thenRun, thenRunArgs}}` with exit code 7. `next.thenRunArgs` is the exact
+  argument list to rerun; `next.params` goes straight into the host confirmation tool.
 - **`truncated: true` means the row limit cut the result**, not that this is all the data. Use `--no-limit`
   (carefully) or add a `WHERE`.
 - Cells are truncated by default: 80 chars for tables, 4096 for JSON (`--max-cell`); binary is shown as
   `<binary N B>`; bigints are strings to avoid precision loss; `NULL` is `NULL` in tables and `null` in JSON.
 
 Exit codes: `0` success · `1` other error · `2` usage · `3` connection selection · `4` read-only guard ·
-`5` driver missing · `6` connection failed.
+`5` driver missing · `6` connection failed · `7` write approval required / not granted (nothing executed).
 
 ## Common errors → next step
 
@@ -324,7 +413,9 @@ Exit codes: `0` success · `1` other error · `2` usage · `3` connection select
 | Kafka `SASL` / `Authentication failed` | wrong user/password/mechanism | set `KAFKA_SASL_MECHANISM` (plain/scram-sha-256/scram-sha-512) and SSL |
 | Kafka `COORDINATOR_NOT_AVAILABLE` | group coordinator moving | retry in a few seconds; persistent errors mean broker instability |
 | Kafka `UNKNOWN_TOPIC_OR_PARTITION` | wrong topic / ACL hides it | confirm with `dbcli tables` |
-| Read-only rejection (exit 4) | statement is a write | confirm with the user, then `--allow-write`; try `--dry-run` first |
+| Read-only rejection (exit 4) | statement is a write | run it with `--allow-write`: that only prints the confirmation card, then approve and rerun with `--approve <code> --agent` |
+| Write needs approval (exit 7) | no `--approve`, or the code is wrong/expired/used, or the SQL/connection changed | rerun the same command without `--approve` for a fresh card; never guess a code |
+| Approval cannot be recorded | the state directory is not writable | allow writes there, or set `DBCLI_STATE_DIR` to a writable directory |
 | Driver missing (exit 5) | engine driver not installed | `dbcli drivers install <name>` (next section) |
 | Certificate / `self-signed certificate` | internal TLS | add `--insecure-tls` on trusted networks |
 
@@ -335,9 +426,10 @@ hand-building connection strings.
 
 1. **Never print passwords.** `list`/`env`/errors/JSON expose only `passwordSet` and the source line.
 2. **Never write config.** No `.env` generation, no token storage, no connection cache.
-3. **Never bypass read-only.** Do not write your own mysql/redis scripts around the guard.
+3. **Never bypass read-only.** Do not write your own mysql/redis scripts around the guard, and do not work
+   around the approval gate (no `--approve` on the user's behalf, no hand-editing the state file).
 4. Prefer read-only accounts for production; when only a privileged account exists, still query read-only
-   first and get explicit approval before any write.
+   first and get the per-statement approval before any write.
 5. Always bound large queries with `WHERE`/`LIMIT`; `--no-limit` only for known-small tables.
 6. Do not dump whole tables containing personal data (ID numbers, phone numbers, password hashes) into the
    conversation.
@@ -390,9 +482,10 @@ npm run test:sandbox                                      # no child processes (
 ```
 
 Coverage: `.env` parsing and expansion, compose/Spring discovery, connection strings (JDBC/Go DSN/libpq),
-read-only guard and row-limit injection, output formats and masking, SQLite end-to-end, Redis (RESP mock),
+read-only guard and row-limit injection, write approval (fingerprints, one-time codes, TTL/session binding,
+`approve` end-to-end, blast-radius hints), output formats and masking, SQLite end-to-end, Redis (RESP mock),
 ClickHouse/Elasticsearch (HTTP mock), Kafka (injected kafkajs double), driver registry.
 
 ## Version
 
-`0.2.3` — keep in sync with `package.json`; update this file and README when behaviour changes.
+`0.3.0` — keep in sync with `package.json`; update this file and README when behaviour changes.

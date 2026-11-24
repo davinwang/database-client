@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { parseJson, runCli, tempDir } from './helpers/util.mjs';
+import { approvalEnv, approveWrite, parseJson, runCli, tempDir } from './helpers/util.mjs';
 
 function makeDatabase() {
   const dir = tempDir('dbcli-sqlite-');
@@ -99,20 +99,26 @@ test('read-only guard: write statements exit 4, multiple statements exit 3', asy
   assert.equal(scalar(file, 'select sum(balance) as s from users').s, (30 * 31) / 2 * 1.5);
 });
 
-test('--allow-write commits and --dry-run rolls back', async () => {
+test('--allow-write: approved writes commit and approved dry-runs roll back', async () => {
   const file = makeDatabase();
-  const env = envFor(file);
+  const env = { ...envFor(file), ...approvalEnv() };
 
-  const written = await runCli(['query', 'update users set balance = 1 where id <= 3', '--allow-write'], { env });
-  assert.equal(written.code, 0, written.stderr);
-  const payload = JSON.parse(written.stdout);
+  // --allow-write alone never executes: it prints the confirmation card (see approve-cli.test.mjs)
+  const requested = await runCli(['query', 'update users set balance = 1 where id <= 3', '--allow-write'], { env });
+  assert.equal(requested.code, 7);
+  assert.equal(parseJson(requested.stdout).status, 'approval_required');
+
+  const written = await approveWrite(['query', 'update users set balance = 1 where id <= 3', '--allow-write'], { env });
+  assert.equal(written.executed.code, 0, written.executed.stderr);
+  const payload = JSON.parse(written.executed.stdout);
   assert.equal(payload.mode, 'write');
   assert.equal(payload.affectedRows, 3);
+  assert.equal(payload.authorizedBy, 'agent');
   assert.equal(scalar(file, 'select count(*) as c from users where balance = 1').c, 3);
 
-  const dry = await runCli(['query', 'update users set balance = 999', '--allow-write', '--dry-run'], { env });
-  assert.equal(dry.code, 0, dry.stderr);
-  const dryPayload = JSON.parse(dry.stdout);
+  const dry = await approveWrite(['query', 'update users set balance = 999', '--allow-write', '--dry-run'], { env });
+  assert.equal(dry.executed.code, 0, dry.executed.stderr);
+  const dryPayload = JSON.parse(dry.executed.stdout);
   assert.equal(dryPayload.mode, 'dry-run');
   assert.equal(dryPayload.rolledBack, true);
   assert.equal(dryPayload.affectedRows, 30);

@@ -97,11 +97,25 @@ Guidelines for tests:
    (`newengine`, vendor-specific spellings), and an entry in `TYPE_META` with `label`, `kind` (`sql`/`mongo`/`redis`/`mq`/`es`),
    `driver` and `defaultPort`. If the engine needs its own URL scheme or DSN shape, extend `parseConnectionUrl` in the same file.
 
-4. **Add docs**: the engine support matrix, the driver table and the connection-string list in `README.md`; the same matrix plus
-   any troubleshooting notes in `SKILL.md`; the changelog entry in `CHANGELOG.md`.
+4. **Add docs**: the engine support matrix, the driver table and the connection-string list in `README.md`; the same matrix
+   plus any unsupported-operation notes in `references/engines.md`; the changelog entry in `CHANGELOG.md`.
 
 5. **Add tests**: a new `tests/<engine>.test.mjs`. Mock the transport rather than requiring a live server, cover the read-only
    path, and cover at least one unsupported method returning a useful `UnsupportedError`.
+
+## Documentation layout (progressive disclosure)
+
+`SKILL.md` is loaded **in full** every time the skill activates, so it is an entrypoint, not a manual:
+
+- `SKILL.md` (≤ 12 KB, ≤ 200 lines) — hard rules, the commands needed to start, the write-approval flow, the output
+  contract, the security rules, and a table of where the details live. Its `description` must stay ≤ 1024 chars, or
+  hosts deactivate the skill.
+- `references/*.md` — the long tail: configuration discovery, write-approval detail, non-SQL engines, engine
+  capabilities and drivers, troubleshooting, development. An agent loads one only when its trigger applies.
+- `SKILL.zh-CN.md` mirrors the entrypoint structure and points at the same (English) reference files.
+
+Add new detail to the matching reference file and at most a one-line pointer in `SKILL.md`. `tests/skill-docs.test.mjs`
+enforces the description limit, the entrypoint budget and that every `references/` link resolves.
 
 ## Code style
 
@@ -125,7 +139,8 @@ Guidelines for tests:
 - If an engine supports transactions, implement `--dry-run` by executing inside a transaction and rolling back. If it does not,
   throw `UnsupportedError` explaining why, instead of pretending to dry-run.
 - `--dry-run` without `--allow-write` must remain a usage error.
-- Document any new write support (and its dry-run status) in the README engine matrix and in `SKILL.md`.
+- Document any new write support (and its dry-run status) in the README engine matrix and in `references/engines.md`, and
+  the approval flow itself in `references/writes.md`.
 - Tests must prove both halves: the operation is rejected without `--allow-write`, and accepted with it.
 
 ## Submitting changes

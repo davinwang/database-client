@@ -11,7 +11,9 @@ Read-only by default, it runs SQL, inspects schemas/indexes/DDL, and reports loc
 - Works with zero dependencies for SQLite, Redis, ClickHouse and Elasticsearch (Node built-ins or plain HTTP).
 - Every other engine installs an npm driver on demand (`dbcli drivers install ...`) — **drivers are never bundled with the skill source**.
 
-The agent-facing usage guide is [SKILL.md](SKILL.md); the license is [GPL-3.0](LICENSE).
+The agent-facing guide is [SKILL.md](SKILL.md) — a deliberately small entrypoint (progressive disclosure) that points
+at on-demand details in [references/](references): configuration discovery, write approval, non-SQL engines, engine
+capabilities, troubleshooting. The license is [GPL-3.0](LICENSE).
 
 ## Why not just use a SQL client
 

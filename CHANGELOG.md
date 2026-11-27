@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-27
+
+### Changed
+
+- **The skill documentation is now progressive-disclosure.** `SKILL.md` is loaded in full on every activation, so it
+  is now an entrypoint (10.3 KB / 165 lines, was 28.5 KB / 491 lines) instead of a manual: hard rules, the commands
+  needed to start, the write-approval flow and its agent rules, the output contract, the security rules, and an index
+  of where the details live. The long tail moved to `references/` and is read only when its trigger applies:
+  `configuration.md` (config discovery), `writes.md` (approval detail), `non-sql.md` (Redis/MongoDB/ES/Kafka),
+  `engines.md` (capabilities + drivers), `troubleshooting.md` (SOP + error table), `development.md`.
+  `SKILL.zh-CN.md` mirrors the entrypoint and points at the same reference files, so there is one source of truth.
+- The skill `description` was shortened from 1197 to 946 characters (the Chinese one from 533 to 478). Some hosts
+  deactivate a skill whose description exceeds 1024 characters; the wording keeps every routing keyword
+  (engine names, `Access denied`, `ORA-*`, `ECONNREFUSED`, `EXPLAIN`, consumer lag, …).
+- The DM8 note in `list` no longer claims that "DM8 does not support direct queries yet" — it does, through the
+  official `dmdb` driver — and the hint for an unsupported command points at `references/engines.md` instead of a
+  section that no longer exists in `SKILL.md`.
+
+### Added
+
+- `tests/skill-docs.test.mjs` guards the documentation: the 1024-character description limit, the frontmatter
+  (name/version/`cliHelp`, version in sync with `package.json`), the `SKILL.md` size budget (12 KB / 200 lines),
+  that every `references/…` path mentioned in the docs or in `lib/` resolves, and that every reference file is
+  listed in both language entrypoints.
+- `CONTRIBUTING.md` documents the layout: details go into the matching reference file plus at most a one-line
+  pointer in `SKILL.md`.
+
+### Fixed
+
+- `package.json` `files` now ships `references/` and `SKILL.zh-CN.md`, which the published package was missing.
+
 ## [0.3.0] - 2026-11-24
 
 ### Added

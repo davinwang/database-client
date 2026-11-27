@@ -11,6 +11,9 @@
 - 零依赖可用：SQLite、Redis、ClickHouse、Elasticsearch（Node 内置能力或 HTTP）。
 - 其余引擎按需安装 npm 驱动（`dbcli drivers install ...`），**不随 skill 源码分发**。
 
+给 Agent 的说明是 [SKILL.md](SKILL.md)——刻意做小的入口（渐进式披露），细节按需读 [references/](references)：
+配置发现、写授权、非 SQL 引擎、引擎能力、排障。许可证 [GPL-3.0](LICENSE)。
+
 ## 为什么不用现成的 SQL 客户端
 
 Agent 排查问题的成本不在「执行 SQL」，而在：

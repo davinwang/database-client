@@ -1,6 +1,6 @@
 {
   "name": "database-client",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Zero-credential, read-only-by-default database & middleware CLI for coding agents: discovers per-project env vars, inspects schema, runs queries, diagnoses locks/slow SQL, follows Redis Cluster redirects, and inspects Kafka topics/lag/messages across MySQL, PostgreSQL, Oracle, SQL Server, SQLite, MongoDB, Redis, Kafka, ClickHouse and Elasticsearch.",
   "license": "GPL-3.0-or-later",
   "author": "Wang Dong <wangdong4@gtht.com>",
@@ -35,7 +35,9 @@
   "files": [
     "bin/",
     "lib/",
+    "references/",
     "SKILL.md",
+    "SKILL.zh-CN.md",
     "README.md",
     ".env.example"
   ],
